@@ -1,0 +1,424 @@
+import { useState, useEffect, useRef } from "react";
+
+// ---------- palette ----------
+const C = {
+  ice: "#EFF4F8",      // page background — cool ice white
+  paper: "#FFFFFF",    // card surface
+  navy: "#12233B",     // primary ink / rink navy
+  steel: "#7E92A6",    // muted labels, below-average fills
+  line: "#D8E2EA",     // hairlines
+  red: "#C8102E",      // elite accent (8+)
+  green: "#1E8A4C",    // positive delta
+};
+
+const bandColor = (v) => (v >= 8 ? C.red : v >= 5 ? C.navy : C.steel);
+
+// ---------- skills (forward, 12U AA) ----------
+const CATEGORIES = [
+  {
+    name: "Skating",
+    items: [
+      ["sk1", "Acceleration (first 3 strides)"],
+      ["sk2", "Top speed"],
+      ["sk3", "Edges & balance"],
+      ["sk4", "Backwards skating"],
+      ["sk5", "Transitions & pivots"],
+      ["sk6", "Agility / stops & starts"],
+    ],
+  },
+  {
+    name: "Puck skills",
+    items: [
+      ["pk1", "Stickhandling in traffic"],
+      ["pk2", "Passing accuracy"],
+      ["pk3", "Pass receiving"],
+      ["pk4", "Shot accuracy"],
+      ["pk5", "Shot power & release"],
+      ["pk6", "Backhand (shots & passes)"],
+      ["pk7", "Puck protection"],
+    ],
+  },
+  {
+    name: "Hockey IQ",
+    items: [
+      ["iq1", "Offensive positioning (soft ice)"],
+      ["iq2", "Defensive positioning (F1\u2013F3)"],
+      ["iq3", "Forecheck & angling"],
+      ["iq4", "Anticipation / reading the play"],
+      ["iq5", "Decision speed with the puck"],
+      ["iq6", "Awareness away from the puck"],
+      ["iq7", "Breakout support (wall play)"],
+    ],
+  },
+  {
+    name: "Compete",
+    items: [
+      ["cp1", "Hustle / effort"],
+      ["cp2", "Battle level (50/50 pucks)"],
+      ["cp3", "Backchecking"],
+      ["cp4", "Net-front & corner presence"],
+      ["cp5", "Stamina / conditioning"],
+    ],
+  },
+  {
+    name: "Intangibles",
+    items: [
+      ["in1", "Coachability"],
+      ["in2", "Response after mistakes"],
+      ["in3", "On-ice communication"],
+      ["in4", "Shift-to-shift consistency"],
+      ["in5", "Discipline"],
+    ],
+  },
+];
+
+const STORAGE_KEY = "kohen-hockey-evals";
+
+// ---------- helpers ----------
+const avgOf = (scores, ids) => {
+  const vals = ids.map((id) => scores[id]).filter((v) => v > 0);
+  if (!vals.length) return null;
+  return vals.reduce((a, b) => a + b, 0) / vals.length;
+};
+const allIds = CATEGORIES.flatMap((c) => c.items.map(([id]) => id));
+const ovrOf = (scores) => {
+  const a = avgOf(scores, allIds);
+  return a === null ? null : Math.round(a * 10);
+};
+const fmtDate = (iso) =>
+  new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+
+export default function KohenScoutingReport() {
+  const [scores, setScores] = useState({});
+  const [note, setNote] = useState("");
+  const [evals, setEvals] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [savedFlash, setSavedFlash] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  const [confirmClear, setConfirmClear] = useState(false);
+  const draftTimer = useRef(null);
+  const hydrated = useRef(false);
+
+  // load on mount
+  useEffect(() => {
+    (async () => {
+      try {
+        const res = await window.storage.get(STORAGE_KEY);
+        if (res && res.value) {
+          const data = JSON.parse(res.value);
+          setEvals(data.evals || []);
+          if (data.draft) {
+            setScores(data.draft.scores || {});
+            setNote(data.draft.note || "");
+          }
+        }
+      } catch (e) {
+        // no saved data yet — start fresh
+      }
+      hydrated.current = true;
+      setLoading(false);
+    })();
+  }, []);
+
+  // debounced draft autosave so in-progress taps survive a reload
+  useEffect(() => {
+    if (!hydrated.current) return;
+    if (draftTimer.current) clearTimeout(draftTimer.current);
+    draftTimer.current = setTimeout(async () => {
+      try {
+        await window.storage.set(
+          STORAGE_KEY,
+          JSON.stringify({ evals, draft: { scores, note } })
+        );
+      } catch (e) {
+        console.error("Autosave failed", e);
+      }
+    }, 800);
+    return () => draftTimer.current && clearTimeout(draftTimer.current);
+  }, [scores, note, evals]);
+
+  const lastEval = evals.length ? evals[evals.length - 1] : null;
+
+  const setScore = (id, v) =>
+    setScores((s) => ({ ...s, [id]: s[id] === v ? 0 : v }));
+
+  const saveEvaluation = async () => {
+    const ratedCount = allIds.filter((id) => scores[id] > 0).length;
+    if (!ratedCount) return;
+    const entry = { date: new Date().toISOString(), scores: { ...scores }, note: note.trim() };
+    const nextEvals = [...evals, entry];
+    setEvals(nextEvals);
+    setNote("");
+    try {
+      await window.storage.set(
+        STORAGE_KEY,
+        JSON.stringify({ evals: nextEvals, draft: { scores, note: "" } })
+      );
+      setSavedFlash(true);
+      setTimeout(() => setSavedFlash(false), 2000);
+    } catch (e) {
+      console.error("Save failed", e);
+    }
+  };
+
+  const clearAll = async () => {
+    setEvals([]);
+    setScores({});
+    setNote("");
+    setConfirmClear(false);
+    setShowHistory(false);
+    try {
+      await window.storage.set(STORAGE_KEY, JSON.stringify({ evals: [], draft: null }));
+    } catch (e) {
+      console.error("Clear failed", e);
+    }
+  };
+
+  const ovr = ovrOf(scores);
+  const lastOvr = lastEval ? ovrOf(lastEval.scores) : null;
+  const ovrDelta = ovr !== null && lastOvr !== null ? ovr - lastOvr : null;
+  const ratedCount = allIds.filter((id) => scores[id] > 0).length;
+
+  const Delta = ({ d, small }) => {
+    if (d === null || d === undefined || d === 0) return null;
+    const up = d > 0;
+    return (
+      <span
+        style={{
+          color: up ? C.green : C.red,
+          fontFamily: "'Barlow Condensed', 'Arial Narrow', sans-serif",
+          fontWeight: 600,
+          fontSize: small ? 12 : 14,
+          letterSpacing: "0.02em",
+        }}
+      >
+        {up ? "\u25B2" : "\u25BC"}{Math.abs(d) % 1 === 0 ? Math.abs(d) : Math.abs(d).toFixed(1)}
+      </span>
+    );
+  };
+
+  if (loading) {
+    return (
+      <div style={{ background: C.ice, minHeight: "100vh" }} className="flex items-center justify-center">
+        <p style={{ color: C.steel, fontFamily: "'Barlow Condensed', sans-serif", fontSize: 18, letterSpacing: "0.15em" }}>
+          LOADING REPORT\u2026
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ background: C.ice, minHeight: "100vh", color: C.navy }}>
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600&display=swap');
+        * { -webkit-tap-highlight-color: transparent; }
+        button:focus-visible { outline: 2px solid ${C.red}; outline-offset: 2px; }
+        @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+      `}</style>
+
+      <div className="max-w-xl mx-auto px-4 pb-16 pt-6" style={{ fontFamily: "'Barlow', system-ui, sans-serif" }}>
+
+        {/* ---------- player card header ---------- */}
+        <div style={{ background: C.navy, borderRadius: 10 }} className="px-5 py-5">
+          <p style={{ color: "#9FB3C8", fontFamily: "'Barlow Condensed', sans-serif", fontSize: 13, letterSpacing: "0.28em", fontWeight: 600 }}>
+            SCOUTING REPORT \u00B7 2026\u201327
+          </p>
+          <div className="flex items-end justify-between mt-2">
+            <div>
+              <h1 style={{ color: "#FFFFFF", fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 700, fontSize: 44, lineHeight: 1, letterSpacing: "0.02em" }}>
+                KOHEN
+              </h1>
+              <p style={{ color: "#9FB3C8", fontFamily: "'Barlow Condensed', sans-serif", fontSize: 16, letterSpacing: "0.14em", fontWeight: 500, marginTop: 4 }}>
+                FORWARD \u00B7 12U AA
+              </p>
+            </div>
+            <div className="text-right">
+              <div style={{ borderLeft: `3px solid ${C.red}` }} className="pl-3">
+                <p style={{ color: "#9FB3C8", fontFamily: "'Barlow Condensed', sans-serif", fontSize: 13, letterSpacing: "0.24em", fontWeight: 600 }}>OVR</p>
+                <p style={{ color: "#FFFFFF", fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 700, fontSize: 46, lineHeight: 1 }}>
+                  {ovr === null ? "\u2013" : ovr}
+                </p>
+                {ovrDelta !== null && ovrDelta !== 0 && (
+                  <p style={{ marginTop: 2 }}><Delta d={ovrDelta} /></p>
+                )}
+              </div>
+            </div>
+          </div>
+          <p style={{ color: "#7E93A6", fontSize: 12, marginTop: 12 }}>
+            Scale anchor: <span style={{ color: "#C6D4E0" }}>5 = average 12U AA forward \u00B7 8+ = top of the league</span>
+          </p>
+        </div>
+
+        {/* ---------- action row ---------- */}
+        <div className="flex gap-2 mt-3">
+          <button
+            onClick={saveEvaluation}
+            disabled={!ratedCount}
+            className="flex-1 py-3 rounded-lg"
+            style={{
+              background: ratedCount ? C.red : "#E3B7BF",
+              color: "#fff",
+              fontFamily: "'Barlow Condensed', sans-serif",
+              fontWeight: 600,
+              fontSize: 17,
+              letterSpacing: "0.12em",
+              transition: "background 0.15s",
+              cursor: ratedCount ? "pointer" : "default",
+            }}
+          >
+            {savedFlash ? "SAVED \u2713" : "SAVE EVALUATION"}
+          </button>
+          <button
+            onClick={() => setShowHistory((h) => !h)}
+            className="px-4 py-3 rounded-lg"
+            style={{
+              background: "#fff",
+              border: `1px solid ${C.line}`,
+              color: C.navy,
+              fontFamily: "'Barlow Condensed', sans-serif",
+              fontWeight: 600,
+              fontSize: 17,
+              letterSpacing: "0.12em",
+            }}
+          >
+            HISTORY{evals.length ? ` (${evals.length})` : ""}
+          </button>
+        </div>
+        <p style={{ color: C.steel, fontSize: 12, marginTop: 8 }}>
+          {ratedCount}/30 skills rated{lastEval ? ` \u00B7 arrows compare to ${fmtDate(lastEval.date)}` : " \u00B7 save a baseline now, re-rate after the summer block"}
+        </p>
+
+        {/* ---------- history ---------- */}
+        {showHistory && (
+          <div className="mt-3 rounded-lg" style={{ background: "#fff", border: `1px solid ${C.line}` }}>
+            {evals.length === 0 ? (
+              <p className="px-4 py-4" style={{ color: C.steel, fontSize: 14 }}>
+                No saved evaluations yet. Rate the skills below, then save your baseline.
+              </p>
+            ) : (
+              <div>
+                {[...evals].reverse().map((ev, i) => (
+                  <div key={i} className="px-4 py-3 flex items-start justify-between" style={{ borderBottom: i < evals.length - 1 ? `1px solid ${C.line}` : "none" }}>
+                    <div>
+                      <p style={{ fontWeight: 600, fontSize: 14 }}>{fmtDate(ev.date)}</p>
+                      {ev.note && <p style={{ color: C.steel, fontSize: 13, marginTop: 2 }}>{ev.note}</p>}
+                    </div>
+                    <p style={{ fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 700, fontSize: 24, color: C.navy }}>
+                      {ovrOf(ev.scores) ?? "\u2013"}
+                      <span style={{ fontSize: 12, color: C.steel, fontWeight: 600, letterSpacing: "0.1em", marginLeft: 3 }}>OVR</span>
+                    </p>
+                  </div>
+                ))}
+                <div className="px-4 py-3" style={{ borderTop: `1px solid ${C.line}` }}>
+                  {confirmClear ? (
+                    <div className="flex gap-2">
+                      <button onClick={clearAll} className="px-3 py-2 rounded" style={{ background: C.red, color: "#fff", fontSize: 13, fontWeight: 600 }}>
+                        Yes, delete everything
+                      </button>
+                      <button onClick={() => setConfirmClear(false)} className="px-3 py-2 rounded" style={{ background: C.ice, color: C.navy, fontSize: 13, fontWeight: 600 }}>
+                        Cancel
+                      </button>
+                    </div>
+                  ) : (
+                    <button onClick={() => setConfirmClear(true)} style={{ color: C.steel, fontSize: 13, textDecoration: "underline" }}>
+                      Clear all history
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ---------- categories ---------- */}
+        {CATEGORIES.map((cat) => {
+          const ids = cat.items.map(([id]) => id);
+          const catAvg = avgOf(scores, ids);
+          const lastCatAvg = lastEval ? avgOf(lastEval.scores, ids) : null;
+          const catDelta =
+            catAvg !== null && lastCatAvg !== null ? Math.round((catAvg - lastCatAvg) * 10) / 10 : null;
+
+          return (
+            <section key={cat.name} className="mt-6">
+              <div className="flex items-baseline justify-between pb-2" style={{ borderBottom: `2px solid ${C.navy}` }}>
+                <h2 style={{ fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 700, fontSize: 22, letterSpacing: "0.1em", textTransform: "uppercase" }}>
+                  {cat.name}
+                </h2>
+                <p style={{ fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 600, fontSize: 18 }}>
+                  {catAvg === null ? (
+                    <span style={{ color: C.steel }}>\u2013</span>
+                  ) : (
+                    <span style={{ color: bandColor(catAvg) }}>{catAvg.toFixed(1)}</span>
+                  )}
+                  {catDelta !== null && catDelta !== 0 && <span className="ml-2"><Delta d={catDelta} small /></span>}
+                </p>
+              </div>
+
+              {cat.items.map(([id, label]) => {
+                const v = scores[id] || 0;
+                const lastV = lastEval ? lastEval.scores[id] || 0 : 0;
+                const d = v > 0 && lastV > 0 ? v - lastV : null;
+                return (
+                  <div key={id} className="py-3" style={{ borderBottom: `1px solid ${C.line}` }}>
+                    <div className="flex items-baseline justify-between mb-2">
+                      <p style={{ fontSize: 15, fontWeight: 500 }}>{label}</p>
+                      <p className="flex items-baseline gap-2">
+                        {d !== null && d !== 0 && <Delta d={d} small />}
+                        <span style={{ fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 700, fontSize: 20, color: v ? bandColor(v) : C.steel, minWidth: 24, textAlign: "right", display: "inline-block" }}>
+                          {v || "\u2013"}
+                        </span>
+                      </p>
+                    </div>
+                    <div className="flex gap-1" role="group" aria-label={`${label} rating`}>
+                      {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => {
+                        const filled = v >= n;
+                        return (
+                          <button
+                            key={n}
+                            onClick={() => setScore(id, n)}
+                            aria-label={`${n} out of 10`}
+                            className="flex-1 rounded"
+                            style={{
+                              height: 40,
+                              background: filled ? bandColor(v) : "#fff",
+                              border: `1px solid ${filled ? bandColor(v) : C.line}`,
+                              color: filled ? "#fff" : C.steel,
+                              fontFamily: "'Barlow Condensed', sans-serif",
+                              fontWeight: 600,
+                              fontSize: 14,
+                              transition: "background 0.1s, border 0.1s",
+                            }}
+                          >
+                            {n}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })}
+            </section>
+          );
+        })}
+
+        {/* ---------- note ---------- */}
+        <section className="mt-6">
+          <h2 style={{ fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 700, fontSize: 22, letterSpacing: "0.1em" }}>
+            NOTES
+          </h2>
+          <textarea
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="Context for this evaluation \u2014 coach feedback, what to work on next\u2026"
+            rows={3}
+            className="w-full mt-2 rounded-lg px-3 py-2"
+            style={{ border: `1px solid ${C.line}`, background: "#fff", fontSize: 14, color: C.navy, resize: "vertical" }}
+          />
+          <p style={{ color: C.steel, fontSize: 12, marginTop: 10 }}>
+            Playing time at AA follows Compete, Hockey IQ, and Coachability more than raw skill. Watch those categories first.
+          </p>
+        </section>
+      </div>
+    </div>
+  );
+}
