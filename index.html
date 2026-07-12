@@ -14,7 +14,7 @@
 <div id="root"></div>
 
 <script>
-// ---- storage shim: mimics the Claude artifact storage API using localStorage ----
+// ---- storage shim: localStorage-backed ----
 window.storage = {
   async get(key) {
     const value = localStorage.getItem("shim:" + key);
@@ -37,21 +37,30 @@ const { useState, useEffect, useRef } = React;
 
 // ---------- palette ----------
 const C = {
-  ice: "#EFF4F8",      // page background — cool ice white
-  paper: "#FFFFFF",    // card surface
-  navy: "#12233B",     // primary ink / rink navy
-  steel: "#7E92A6",    // muted labels, below-average fills
-  line: "#D8E2EA",     // hairlines
-  red: "#C8102E",      // elite accent (8+)
-  green: "#1E8A4C",    // positive delta
+  ice: "#EFF4F8",
+  paper: "#FFFFFF",
+  navy: "#12233B",
+  steel: "#7E92A6",
+  line: "#D8E2EA",
+  red: "#C8102E",
+  green: "#1E8A4C",
 };
 
 const bandColor = (v) => (v >= 8 ? C.red : v >= 5 ? C.navy : C.steel);
+
+// ---------- evaluators ----------
+const EVALUATORS = [
+  { id: "coach", label: "Coach", color: "#12233B" },
+  { id: "kohen", label: "Kohen", color: "#C8102E" },
+  { id: "dad",   label: "Dad",   color: "#C99700" },
+];
+const evMeta = (id) => EVALUATORS.find((e) => e.id === id);
 
 // ---------- skills (forward, 12U AA) ----------
 const CATEGORIES = [
   {
     name: "Skating",
+    short: "SKATE",
     items: [
       ["sk1", "Acceleration (first 3 strides)"],
       ["sk2", "Top speed"],
@@ -63,6 +72,7 @@ const CATEGORIES = [
   },
   {
     name: "Puck skills",
+    short: "PUCK",
     items: [
       ["pk1", "Stickhandling in traffic"],
       ["pk2", "Passing accuracy"],
@@ -75,6 +85,7 @@ const CATEGORIES = [
   },
   {
     name: "Hockey IQ",
+    short: "IQ",
     items: [
       ["iq1", "Offensive positioning (soft ice)"],
       ["iq2", "Defensive positioning (F1–F3)"],
@@ -87,6 +98,7 @@ const CATEGORIES = [
   },
   {
     name: "Compete",
+    short: "COMPETE",
     items: [
       ["cp1", "Hustle / effort"],
       ["cp2", "Battle level (50/50 pucks)"],
@@ -97,6 +109,7 @@ const CATEGORIES = [
   },
   {
     name: "Intangibles",
+    short: "INTANG",
     items: [
       ["in1", "Coachability"],
       ["in2", "Response after mistakes"],
@@ -108,6 +121,8 @@ const CATEGORIES = [
 ];
 
 const STORAGE_KEY = "kohen-hockey-evals";
+const ALL_SKILLS = CATEGORIES.flatMap((c) => c.items.map(([id, label]) => ({ id, label, cat: c.name })));
+const allIds = ALL_SKILLS.map((s) => s.id);
 
 // ---------- helpers ----------
 const avgOf = (scores, ids) => {
@@ -115,129 +130,296 @@ const avgOf = (scores, ids) => {
   if (!vals.length) return null;
   return vals.reduce((a, b) => a + b, 0) / vals.length;
 };
-const allIds = CATEGORIES.flatMap((c) => c.items.map(([id]) => id));
 const ovrOf = (scores) => {
   const a = avgOf(scores, allIds);
   return a === null ? null : Math.round(a * 10);
 };
 const fmtDate = (iso) =>
   new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+const fmtShort = (iso) =>
+  new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric" });
 
+const emptyDraft = () => ({ scores: {}, note: "" });
+const emptyStore = () => ({
+  version: 2,
+  evaluators: {
+    coach: { evals: [], draft: emptyDraft() },
+    kohen: { evals: [], draft: emptyDraft() },
+    dad:   { evals: [], draft: emptyDraft() },
+  },
+});
+
+// migrate v1 single-track data → v2 (old evals belonged to Dad)
+const migrate = (data) => {
+  if (data && data.version === 2 && data.evaluators) {
+    const s = emptyStore();
+    for (const id of Object.keys(s.evaluators)) {
+      const src = data.evaluators[id];
+      if (src) s.evaluators[id] = {
+        evals: Array.isArray(src.evals) ? src.evals : [],
+        draft: src.draft && src.draft.scores ? { scores: src.draft.scores, note: src.draft.note || "" } : emptyDraft(),
+      };
+    }
+    return s;
+  }
+  const s = emptyStore();
+  if (data && Array.isArray(data.evals)) {
+    s.evaluators.dad.evals = data.evals;
+    if (data.draft) s.evaluators.dad.draft = { scores: data.draft.scores || {}, note: data.draft.note || "" };
+  }
+  return s;
+};
+
+const condensed = "'Barlow Condensed', 'Arial Narrow', sans-serif";
+
+// ============================================================
+// Radar overlay — latest eval per evaluator, one axis per category
+// ============================================================
+function RadarOverlay({ latestByEvaluator }) {
+  const W = 340, H = 300, cx = W / 2, cy = H / 2 + 6, R = 104;
+  const N = CATEGORIES.length;
+  const ang = (i) => ((-90 + (i * 360) / N) * Math.PI) / 180;
+  const pt = (i, v) => [cx + Math.cos(ang(i)) * (R * v) / 10, cy + Math.sin(ang(i)) * (R * v) / 10];
+
+  const rings = [2.5, 5, 7.5, 10];
+  const active = EVALUATORS.filter((e) => latestByEvaluator[e.id]);
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", maxWidth: 380, display: "block", margin: "0 auto" }} role="img" aria-label="Category comparison radar chart">
+      <polygon
+        points={Array.from({ length: N }, (_, i) => pt(i, 10).join(",")).join(" ")}
+        fill="#FFFFFF" stroke="none"
+      />
+      {rings.map((r) => (
+        <polygon
+          key={r}
+          points={Array.from({ length: N }, (_, i) => pt(i, r).join(",")).join(" ")}
+          fill="none" stroke={C.line} strokeWidth="1"
+        />
+      ))}
+      {Array.from({ length: N }, (_, i) => {
+        const [x, y] = pt(i, 10);
+        return <line key={i} x1={cx} y1={cy} x2={x} y2={y} stroke={C.line} strokeWidth="1" />;
+      })}
+      <polygon
+        points={Array.from({ length: N }, (_, i) => pt(i, 5).join(",")).join(" ")}
+        fill="none" stroke={C.steel} strokeWidth="1.5" strokeDasharray="4 3"
+      />
+      {active.map((e) => {
+        const scores = latestByEvaluator[e.id].scores;
+        const vals = CATEGORIES.map((c) => avgOf(scores, c.items.map(([id]) => id)) || 0);
+        const pts = vals.map((v, i) => pt(i, v));
+        return (
+          <g key={e.id}>
+            <polygon points={pts.map((p) => p.join(",")).join(" ")} fill={e.color} fillOpacity="0.10" stroke={e.color} strokeWidth="2.5" strokeLinejoin="round" />
+            {pts.map((p, i) => vals[i] > 0 && <circle key={i} cx={p[0]} cy={p[1]} r="3" fill={e.color} />)}
+          </g>
+        );
+      })}
+      {CATEGORIES.map((c, i) => {
+        const [x, y] = pt(i, 12.1);
+        return (
+          <text key={c.name} x={x} y={y} textAnchor="middle" dominantBaseline="middle"
+            style={{ fontFamily: condensed, fontSize: 13, fontWeight: 600, letterSpacing: "0.08em", fill: C.navy }}>
+            {c.short}
+          </text>
+        );
+      })}
+    </svg>
+  );
+}
+
+// ============================================================
+// OVR trend — one line per evaluator across saved evals
+// ============================================================
+function TrendChart({ store }) {
+  const W = 340, H = 180, PL = 34, PR = 14, PT = 12, PB = 26;
+  const series = EVALUATORS.map((e) => ({
+    ...e,
+    points: store.evaluators[e.id].evals
+      .map((ev) => ({ t: new Date(ev.date).getTime(), ovr: ovrOf(ev.scores) }))
+      .filter((p) => p.ovr !== null),
+  })).filter((s) => s.points.length > 0);
+
+  const allPts = series.flatMap((s) => s.points);
+  if (!allPts.length) return null;
+  const minT = Math.min(...allPts.map((p) => p.t));
+  const maxT = Math.max(...allPts.map((p) => p.t));
+  const span = maxT - minT || 1;
+  const x = (t) => PL + ((t - minT) / span) * (W - PL - PR);
+  const y = (ovr) => H - PB - (ovr / 100) * (H - PT - PB);
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", maxWidth: 380, display: "block", margin: "0 auto" }} role="img" aria-label="Overall rating trend over time">
+      {[25, 50, 75, 100].map((g) => (
+        <g key={g}>
+          <line x1={PL} y1={y(g)} x2={W - PR} y2={y(g)} stroke={C.line} strokeWidth="1" />
+          <text x={PL - 6} y={y(g)} textAnchor="end" dominantBaseline="middle" style={{ fontSize: 10, fill: C.steel, fontFamily: condensed }}>{g}</text>
+        </g>
+      ))}
+      <line x1={PL} y1={y(50)} x2={W - PR} y2={y(50)} stroke={C.steel} strokeWidth="1.5" strokeDasharray="4 3" />
+      {series.map((s) => (
+        <g key={s.id}>
+          {s.points.length > 1 && (
+            <polyline points={s.points.map((p) => `${x(p.t)},${y(p.ovr)}`).join(" ")} fill="none" stroke={s.color} strokeWidth="2.5" strokeLinejoin="round" />
+          )}
+          {s.points.map((p, i) => <circle key={i} cx={x(p.t)} cy={y(p.ovr)} r="3.5" fill={s.color} />)}
+        </g>
+      ))}
+      <text x={PL} y={H - 8} style={{ fontSize: 10, fill: C.steel, fontFamily: condensed }}>{fmtShort(new Date(minT).toISOString())}</text>
+      {maxT !== minT && (
+        <text x={W - PR} y={H - 8} textAnchor="end" style={{ fontSize: 10, fill: C.steel, fontFamily: condensed }}>{fmtShort(new Date(maxT).toISOString())}</text>
+      )}
+    </svg>
+  );
+}
+
+// ============================================================
+// Main app
+// ============================================================
 function KohenScoutingReport() {
-  const [scores, setScores] = useState({});
-  const [note, setNote] = useState("");
-  const [evals, setEvals] = useState([]);
+  const [store, setStore] = useState(emptyStore());
+  const [active, setActive] = useState("coach");
   const [loading, setLoading] = useState(true);
   const [savedFlash, setSavedFlash] = useState(false);
-  const [showHistory, setShowHistory] = useState(false);
+  const [view, setView] = useState("rate"); // rate | history | compare
   const [confirmClear, setConfirmClear] = useState(false);
   const draftTimer = useRef(null);
   const hydrated = useRef(false);
+  const fileRef = useRef(null);
 
-  // load on mount
   useEffect(() => {
     (async () => {
       try {
         const res = await window.storage.get(STORAGE_KEY);
-        if (res && res.value) {
-          const data = JSON.parse(res.value);
-          setEvals(data.evals || []);
-          if (data.draft) {
-            setScores(data.draft.scores || {});
-            setNote(data.draft.note || "");
-          }
-        }
-      } catch (e) {
-        // no saved data yet — start fresh
-      }
+        if (res && res.value) setStore(migrate(JSON.parse(res.value)));
+      } catch (e) { /* fresh start */ }
       hydrated.current = true;
       setLoading(false);
     })();
   }, []);
 
-  // debounced draft autosave so in-progress taps survive a reload
   useEffect(() => {
     if (!hydrated.current) return;
     if (draftTimer.current) clearTimeout(draftTimer.current);
     draftTimer.current = setTimeout(async () => {
-      try {
-        await window.storage.set(
-          STORAGE_KEY,
-          JSON.stringify({ evals, draft: { scores, note } })
-        );
-      } catch (e) {
-        console.error("Autosave failed", e);
-      }
-    }, 800);
+      try { await window.storage.set(STORAGE_KEY, JSON.stringify(store)); }
+      catch (e) { console.error("Autosave failed", e); }
+    }, 700);
     return () => draftTimer.current && clearTimeout(draftTimer.current);
-  }, [scores, note, evals]);
+  }, [store]);
 
+  const me = store.evaluators[active];
+  const scores = me.draft.scores;
+  const note = me.draft.note;
+  const evals = me.evals;
   const lastEval = evals.length ? evals[evals.length - 1] : null;
 
+  const patchActive = (fn) =>
+    setStore((s) => ({ ...s, evaluators: { ...s.evaluators, [active]: fn(s.evaluators[active]) } }));
+
   const setScore = (id, v) =>
-    setScores((s) => ({ ...s, [id]: s[id] === v ? 0 : v }));
+    patchActive((ev) => ({ ...ev, draft: { ...ev.draft, scores: { ...ev.draft.scores, [id]: ev.draft.scores[id] === v ? 0 : v } } }));
+  const setNote = (text) =>
+    patchActive((ev) => ({ ...ev, draft: { ...ev.draft, note: text } }));
 
-  const saveEvaluation = async () => {
-    const ratedCount = allIds.filter((id) => scores[id] > 0).length;
+  const ratedCount = allIds.filter((id) => scores[id] > 0).length;
+
+  const saveEvaluation = () => {
     if (!ratedCount) return;
-    const entry = { date: new Date().toISOString(), scores: { ...scores }, note: note.trim() };
-    const nextEvals = [...evals, entry];
-    setEvals(nextEvals);
-    setNote("");
-    try {
-      await window.storage.set(
-        STORAGE_KEY,
-        JSON.stringify({ evals: nextEvals, draft: { scores, note: "" } })
-      );
-      setSavedFlash(true);
-      setTimeout(() => setSavedFlash(false), 2000);
-    } catch (e) {
-      console.error("Save failed", e);
-    }
+    const entry = { date: new Date().toISOString(), scores: { ...scores }, note: (note || "").trim() };
+    patchActive((ev) => ({ ...ev, evals: [...ev.evals, entry], draft: { ...ev.draft, note: "" } }));
+    setSavedFlash(true);
+    setTimeout(() => setSavedFlash(false), 2000);
   };
 
-  const clearAll = async () => {
-    setEvals([]);
-    setScores({});
-    setNote("");
+  const clearActive = () => {
+    patchActive(() => ({ evals: [], draft: emptyDraft() }));
     setConfirmClear(false);
-    setShowHistory(false);
-    try {
-      await window.storage.set(STORAGE_KEY, JSON.stringify({ evals: [], draft: null }));
-    } catch (e) {
-      console.error("Clear failed", e);
-    }
   };
 
+  // ---------- export / import ----------
+  const exportData = () => {
+    const blob = new Blob([JSON.stringify(store, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `kohen-scorecard-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+  const importData = (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        const next = migrate(parsed);
+        const total = EVALUATORS.reduce((n, ev) => n + next.evaluators[ev.id].evals.length, 0);
+        if (window.confirm(`Import ${total} saved evaluation${total === 1 ? "" : "s"}? This replaces everything currently on this device.`)) {
+          setStore(next);
+        }
+      } catch (err) {
+        window.alert("That file doesn't look like a scorecard backup.");
+      }
+      e.target.value = "";
+    };
+    reader.readAsText(file);
+  };
+
+  // ---------- comparison data ----------
+  const latestByEvaluator = {};
+  EVALUATORS.forEach((e) => {
+    const evs = store.evaluators[e.id].evals;
+    if (evs.length) latestByEvaluator[e.id] = evs[evs.length - 1];
+  });
+  const evaluatorsWithData = EVALUATORS.filter((e) => latestByEvaluator[e.id]);
+
+  const gaps = ALL_SKILLS.map((sk) => {
+    const readings = evaluatorsWithData
+      .map((e) => ({ e, v: latestByEvaluator[e.id].scores[sk.id] || 0 }))
+      .filter((r) => r.v > 0);
+    if (readings.length < 2) return null;
+    const hi = readings.reduce((a, b) => (b.v > a.v ? b : a));
+    const lo = readings.reduce((a, b) => (b.v < a.v ? b : a));
+    return { ...sk, hi, lo, gap: hi.v - lo.v };
+  }).filter((g) => g && g.gap >= 2).sort((a, b) => b.gap - a.gap).slice(0, 6);
+
+  // ---------- header numbers (current evaluator) ----------
   const ovr = ovrOf(scores);
   const lastOvr = lastEval ? ovrOf(lastEval.scores) : null;
   const ovrDelta = ovr !== null && lastOvr !== null ? ovr - lastOvr : null;
-  const ratedCount = allIds.filter((id) => scores[id] > 0).length;
 
   const Delta = ({ d, small }) => {
     if (d === null || d === undefined || d === 0) return null;
     const up = d > 0;
     return (
-      <span
-        style={{
-          color: up ? C.green : C.red,
-          fontFamily: "'Barlow Condensed', 'Arial Narrow', sans-serif",
-          fontWeight: 600,
-          fontSize: small ? 12 : 14,
-          letterSpacing: "0.02em",
-        }}
-      >
+      <span style={{ color: up ? C.green : C.red, fontFamily: condensed, fontWeight: 600, fontSize: small ? 12 : 14, letterSpacing: "0.02em" }}>
         {up ? "▲" : "▼"}{Math.abs(d) % 1 === 0 ? Math.abs(d) : Math.abs(d).toFixed(1)}
       </span>
     );
   };
 
+  const tabBtn = (label, id) => (
+    <button
+      key={id}
+      onClick={() => { setView(id); setConfirmClear(false); }}
+      className="flex-1 py-3 rounded-lg"
+      style={{
+        background: view === id ? C.navy : "#fff",
+        border: `1px solid ${view === id ? C.navy : C.line}`,
+        color: view === id ? "#fff" : C.navy,
+        fontFamily: condensed, fontWeight: 600, fontSize: 16, letterSpacing: "0.1em",
+      }}
+    >
+      {label}
+    </button>
+  );
+
   if (loading) {
     return (
       <div style={{ background: C.ice, minHeight: "100vh" }} className="flex items-center justify-center">
-        <p style={{ color: C.steel, fontFamily: "'Barlow Condensed', sans-serif", fontSize: 18, letterSpacing: "0.15em" }}>
-          LOADING REPORT…
-        </p>
+        <p style={{ color: C.steel, fontFamily: condensed, fontSize: 18, letterSpacing: "0.15em" }}>LOADING REPORT…</p>
       </div>
     );
   }
@@ -253,29 +435,25 @@ function KohenScoutingReport() {
 
       <div className="max-w-xl mx-auto px-4 pb-16 pt-6" style={{ fontFamily: "'Barlow', system-ui, sans-serif" }}>
 
-        {/* ---------- player card header ---------- */}
+        {/* ---------- player card ---------- */}
         <div style={{ background: C.navy, borderRadius: 10 }} className="px-5 py-5">
-          <p style={{ color: "#9FB3C8", fontFamily: "'Barlow Condensed', sans-serif", fontSize: 13, letterSpacing: "0.28em", fontWeight: 600 }}>
+          <p style={{ color: "#9FB3C8", fontFamily: condensed, fontSize: 13, letterSpacing: "0.28em", fontWeight: 600 }}>
             SCOUTING REPORT · 2026–27
           </p>
           <div className="flex items-end justify-between mt-2">
             <div>
-              <h1 style={{ color: "#FFFFFF", fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 700, fontSize: 44, lineHeight: 1, letterSpacing: "0.02em" }}>
-                KOHEN
-              </h1>
-              <p style={{ color: "#9FB3C8", fontFamily: "'Barlow Condensed', sans-serif", fontSize: 16, letterSpacing: "0.14em", fontWeight: 500, marginTop: 4 }}>
+              <h1 style={{ color: "#FFFFFF", fontFamily: condensed, fontWeight: 700, fontSize: 44, lineHeight: 1, letterSpacing: "0.02em" }}>KOHEN</h1>
+              <p style={{ color: "#9FB3C8", fontFamily: condensed, fontSize: 16, letterSpacing: "0.14em", fontWeight: 500, marginTop: 4 }}>
                 FORWARD · 12U AA
               </p>
             </div>
             <div className="text-right">
-              <div style={{ borderLeft: `3px solid ${C.red}` }} className="pl-3">
-                <p style={{ color: "#9FB3C8", fontFamily: "'Barlow Condensed', sans-serif", fontSize: 13, letterSpacing: "0.24em", fontWeight: 600 }}>OVR</p>
-                <p style={{ color: "#FFFFFF", fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 700, fontSize: 46, lineHeight: 1 }}>
-                  {ovr === null ? "–" : ovr}
+              <div style={{ borderLeft: `3px solid ${evMeta(active).color === C.navy ? C.red : evMeta(active).color}` }} className="pl-3">
+                <p style={{ color: "#9FB3C8", fontFamily: condensed, fontSize: 13, letterSpacing: "0.24em", fontWeight: 600 }}>
+                  OVR · {evMeta(active).label.toUpperCase()}
                 </p>
-                {ovrDelta !== null && ovrDelta !== 0 && (
-                  <p style={{ marginTop: 2 }}><Delta d={ovrDelta} /></p>
-                )}
+                <p style={{ color: "#FFFFFF", fontFamily: condensed, fontWeight: 700, fontSize: 46, lineHeight: 1 }}>{ovr === null ? "–" : ovr}</p>
+                {ovrDelta !== null && ovrDelta !== 0 && <p style={{ marginTop: 2 }}><Delta d={ovrDelta} /></p>}
               </div>
             </div>
           </div>
@@ -284,71 +462,178 @@ function KohenScoutingReport() {
           </p>
         </div>
 
-        {/* ---------- action row ---------- */}
+        {/* ---------- evaluator switcher ---------- */}
         <div className="flex gap-2 mt-3">
-          <button
-            onClick={saveEvaluation}
-            disabled={!ratedCount}
-            className="flex-1 py-3 rounded-lg"
-            style={{
-              background: ratedCount ? C.red : "#E3B7BF",
-              color: "#fff",
-              fontFamily: "'Barlow Condensed', sans-serif",
-              fontWeight: 600,
-              fontSize: 17,
-              letterSpacing: "0.12em",
-              transition: "background 0.15s",
-              cursor: ratedCount ? "pointer" : "default",
-            }}
-          >
-            {savedFlash ? "SAVED ✓" : "SAVE EVALUATION"}
-          </button>
-          <button
-            onClick={() => setShowHistory((h) => !h)}
-            className="px-4 py-3 rounded-lg"
-            style={{
-              background: "#fff",
-              border: `1px solid ${C.line}`,
-              color: C.navy,
-              fontFamily: "'Barlow Condensed', sans-serif",
-              fontWeight: 600,
-              fontSize: 17,
-              letterSpacing: "0.12em",
-            }}
-          >
-            HISTORY{evals.length ? ` (${evals.length})` : ""}
-          </button>
+          {EVALUATORS.map((e) => {
+            const on = active === e.id;
+            const n = store.evaluators[e.id].evals.length;
+            return (
+              <button
+                key={e.id}
+                onClick={() => { setActive(e.id); setConfirmClear(false); }}
+                className="flex-1 py-2 rounded-lg"
+                aria-pressed={on}
+                style={{
+                  background: on ? e.color : "#fff",
+                  border: `2px solid ${e.color}`,
+                  color: on ? "#fff" : e.color,
+                  fontFamily: condensed, fontWeight: 700, fontSize: 16, letterSpacing: "0.1em",
+                  transition: "background 0.15s, color 0.15s",
+                }}
+              >
+                {e.label.toUpperCase()}{n ? ` (${n})` : ""}
+              </button>
+            );
+          })}
         </div>
-        <p style={{ color: C.steel, fontSize: 12, marginTop: 8 }}>
-          {ratedCount}/30 skills rated{lastEval ? ` · arrows compare to ${fmtDate(lastEval.date)}` : " · save a baseline now, re-rate after the summer block"}
+        <p style={{ color: C.steel, fontSize: 12, marginTop: 6 }}>
+          Rating as <span style={{ fontWeight: 600, color: evMeta(active).color }}>{evMeta(active).label}</span> — hand the phone over and switch tabs for each evaluator.
         </p>
 
-        {/* ---------- history ---------- */}
-        {showHistory && (
+        {/* ---------- view tabs ---------- */}
+        <div className="flex gap-2 mt-3">
+          {tabBtn("RATE", "rate")}
+          {tabBtn(`HISTORY${evals.length ? ` (${evals.length})` : ""}`, "history")}
+          {tabBtn("COMPARE", "compare")}
+        </div>
+
+        {/* ================= RATE ================= */}
+        {view === "rate" && (
+          <div>
+            <button
+              onClick={saveEvaluation}
+              disabled={!ratedCount}
+              className="w-full py-3 rounded-lg mt-3"
+              style={{
+                background: ratedCount ? C.red : "#E3B7BF", color: "#fff",
+                fontFamily: condensed, fontWeight: 600, fontSize: 17, letterSpacing: "0.12em",
+                cursor: ratedCount ? "pointer" : "default", transition: "background 0.15s",
+              }}
+            >
+              {savedFlash ? "SAVED ✓" : `SAVE ${evMeta(active).label.toUpperCase()}'S EVALUATION`}
+            </button>
+            <p style={{ color: C.steel, fontSize: 12, marginTop: 8 }}>
+              {ratedCount}/30 skills rated{lastEval ? ` · arrows compare to ${evMeta(active).label}'s last save (${fmtDate(lastEval.date)})` : ` · this will be ${evMeta(active).label}'s baseline`}
+            </p>
+
+            {CATEGORIES.map((cat) => {
+              const ids = cat.items.map(([id]) => id);
+              const catAvg = avgOf(scores, ids);
+              const lastCatAvg = lastEval ? avgOf(lastEval.scores, ids) : null;
+              const catDelta = catAvg !== null && lastCatAvg !== null ? Math.round((catAvg - lastCatAvg) * 10) / 10 : null;
+
+              return (
+                <section key={cat.name} className="mt-6">
+                  <div className="flex items-baseline justify-between pb-2" style={{ borderBottom: `2px solid ${C.navy}` }}>
+                    <h2 style={{ fontFamily: condensed, fontWeight: 700, fontSize: 22, letterSpacing: "0.1em", textTransform: "uppercase" }}>{cat.name}</h2>
+                    <p style={{ fontFamily: condensed, fontWeight: 600, fontSize: 18 }}>
+                      {catAvg === null ? <span style={{ color: C.steel }}>–</span> : <span style={{ color: bandColor(catAvg) }}>{catAvg.toFixed(1)}</span>}
+                      {catDelta !== null && catDelta !== 0 && <span className="ml-2"><Delta d={catDelta} small /></span>}
+                    </p>
+                  </div>
+
+                  {cat.items.map(([id, label]) => {
+                    const v = scores[id] || 0;
+                    const lastV = lastEval ? lastEval.scores[id] || 0 : 0;
+                    const d = v > 0 && lastV > 0 ? v - lastV : null;
+                    return (
+                      <div key={id} className="py-3" style={{ borderBottom: `1px solid ${C.line}` }}>
+                        <div className="flex items-baseline justify-between mb-2">
+                          <p style={{ fontSize: 15, fontWeight: 500 }}>{label}</p>
+                          <p className="flex items-baseline gap-2">
+                            {d !== null && d !== 0 && <Delta d={d} small />}
+                            <span style={{ fontFamily: condensed, fontWeight: 700, fontSize: 20, color: v ? bandColor(v) : C.steel, minWidth: 24, textAlign: "right", display: "inline-block" }}>
+                              {v || "–"}
+                            </span>
+                          </p>
+                        </div>
+                        <div className="flex gap-1" role="group" aria-label={`${label} rating`}>
+                          {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => {
+                            const filled = v >= n;
+                            return (
+                              <button
+                                key={n}
+                                onClick={() => setScore(id, n)}
+                                aria-label={`${n} out of 10`}
+                                className="flex-1 rounded"
+                                style={{
+                                  height: 40,
+                                  background: filled ? bandColor(v) : "#fff",
+                                  border: `1px solid ${filled ? bandColor(v) : C.line}`,
+                                  color: filled ? "#fff" : C.steel,
+                                  fontFamily: condensed, fontWeight: 600, fontSize: 14,
+                                  transition: "background 0.1s, border 0.1s",
+                                }}
+                              >
+                                {n}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </section>
+              );
+            })}
+
+            <section className="mt-6">
+              <h2 style={{ fontFamily: condensed, fontWeight: 700, fontSize: 22, letterSpacing: "0.1em" }}>NOTES</h2>
+              <textarea
+                value={note}
+                onChange={(e) => setNote(e.target.value)}
+                placeholder="Context for this evaluation — coach feedback, what to work on next…"
+                rows={3}
+                className="w-full mt-2 rounded-lg px-3 py-2"
+                style={{ border: `1px solid ${C.line}`, background: "#fff", fontSize: 14, color: C.navy, resize: "vertical" }}
+              />
+              <p style={{ color: C.steel, fontSize: 12, marginTop: 10 }}>
+                Playing time at AA follows Compete, Hockey IQ, and Coachability more than raw skill. Watch those categories first.
+              </p>
+            </section>
+          </div>
+        )}
+
+        {/* ================= HISTORY ================= */}
+        {view === "history" && (
           <div className="mt-3 rounded-lg" style={{ background: "#fff", border: `1px solid ${C.line}` }}>
+            <div className="px-4 py-3" style={{ borderBottom: `1px solid ${C.line}` }}>
+              <p style={{ fontFamily: condensed, fontWeight: 700, fontSize: 18, letterSpacing: "0.08em", color: evMeta(active).color }}>
+                {evMeta(active).label.toUpperCase()}'S EVALUATIONS
+              </p>
+            </div>
             {evals.length === 0 ? (
               <p className="px-4 py-4" style={{ color: C.steel, fontSize: 14 }}>
-                No saved evaluations yet. Rate the skills below, then save your baseline.
+                No saved evaluations from {evMeta(active).label} yet. Switch to the Rate tab, score the skills, and save a baseline.
               </p>
             ) : (
               <div>
-                {[...evals].reverse().map((ev, i) => (
-                  <div key={i} className="px-4 py-3 flex items-start justify-between" style={{ borderBottom: i < evals.length - 1 ? `1px solid ${C.line}` : "none" }}>
-                    <div>
-                      <p style={{ fontWeight: 600, fontSize: 14 }}>{fmtDate(ev.date)}</p>
-                      {ev.note && <p style={{ color: C.steel, fontSize: 13, marginTop: 2 }}>{ev.note}</p>}
+                {[...evals].reverse().map((ev, i) => {
+                  const idx = evals.length - 1 - i;
+                  const prev = idx > 0 ? evals[idx - 1] : null;
+                  const o = ovrOf(ev.scores);
+                  const po = prev ? ovrOf(prev.scores) : null;
+                  const d = o !== null && po !== null ? o - po : null;
+                  return (
+                    <div key={i} className="px-4 py-3 flex items-start justify-between" style={{ borderBottom: `1px solid ${C.line}` }}>
+                      <div>
+                        <p style={{ fontWeight: 600, fontSize: 14 }}>{fmtDate(ev.date)}</p>
+                        {ev.note && <p style={{ color: C.steel, fontSize: 13, marginTop: 2 }}>{ev.note}</p>}
+                      </div>
+                      <p className="flex items-baseline gap-2">
+                        {d !== null && d !== 0 && <Delta d={d} small />}
+                        <span style={{ fontFamily: condensed, fontWeight: 700, fontSize: 24, color: C.navy }}>
+                          {o ?? "–"}<span style={{ fontSize: 12, color: C.steel, fontWeight: 600, letterSpacing: "0.1em", marginLeft: 3 }}>OVR</span>
+                        </span>
+                      </p>
                     </div>
-                    <p style={{ fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 700, fontSize: 24, color: C.navy }}>
-                      {ovrOf(ev.scores) ?? "–"}
-                      <span style={{ fontSize: 12, color: C.steel, fontWeight: 600, letterSpacing: "0.1em", marginLeft: 3 }}>OVR</span>
-                    </p>
-                  </div>
-                ))}
-                <div className="px-4 py-3" style={{ borderTop: `1px solid ${C.line}` }}>
+                  );
+                })}
+                <div className="px-4 py-3">
                   {confirmClear ? (
                     <div className="flex gap-2">
-                      <button onClick={clearAll} className="px-3 py-2 rounded" style={{ background: C.red, color: "#fff", fontSize: 13, fontWeight: 600 }}>
-                        Yes, delete everything
+                      <button onClick={clearActive} className="px-3 py-2 rounded" style={{ background: C.red, color: "#fff", fontSize: 13, fontWeight: 600 }}>
+                        Yes, delete {evMeta(active).label}'s history
                       </button>
                       <button onClick={() => setConfirmClear(false)} className="px-3 py-2 rounded" style={{ background: C.ice, color: C.navy, fontSize: 13, fontWeight: 600 }}>
                         Cancel
@@ -356,7 +641,7 @@ function KohenScoutingReport() {
                     </div>
                   ) : (
                     <button onClick={() => setConfirmClear(true)} style={{ color: C.steel, fontSize: 13, textDecoration: "underline" }}>
-                      Clear all history
+                      Clear {evMeta(active).label}'s history
                     </button>
                   )}
                 </div>
@@ -365,94 +650,97 @@ function KohenScoutingReport() {
           </div>
         )}
 
-        {/* ---------- categories ---------- */}
-        {CATEGORIES.map((cat) => {
-          const ids = cat.items.map(([id]) => id);
-          const catAvg = avgOf(scores, ids);
-          const lastCatAvg = lastEval ? avgOf(lastEval.scores, ids) : null;
-          const catDelta =
-            catAvg !== null && lastCatAvg !== null ? Math.round((catAvg - lastCatAvg) * 10) / 10 : null;
-
-          return (
-            <section key={cat.name} className="mt-6">
-              <div className="flex items-baseline justify-between pb-2" style={{ borderBottom: `2px solid ${C.navy}` }}>
-                <h2 style={{ fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 700, fontSize: 22, letterSpacing: "0.1em", textTransform: "uppercase" }}>
-                  {cat.name}
-                </h2>
-                <p style={{ fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 600, fontSize: 18 }}>
-                  {catAvg === null ? (
-                    <span style={{ color: C.steel }}>–</span>
-                  ) : (
-                    <span style={{ color: bandColor(catAvg) }}>{catAvg.toFixed(1)}</span>
-                  )}
-                  {catDelta !== null && catDelta !== 0 && <span className="ml-2"><Delta d={catDelta} small /></span>}
+        {/* ================= COMPARE ================= */}
+        {view === "compare" && (
+          <div>
+            {evaluatorsWithData.length === 0 && (
+              <div className="mt-3 rounded-lg px-4 py-4" style={{ background: "#fff", border: `1px solid ${C.line}` }}>
+                <p style={{ color: C.steel, fontSize: 14 }}>
+                  Nothing to compare yet. Save at least one evaluation from any evaluator and this page lights up — two or more evaluators makes it interesting.
                 </p>
               </div>
+            )}
 
-              {cat.items.map(([id, label]) => {
-                const v = scores[id] || 0;
-                const lastV = lastEval ? lastEval.scores[id] || 0 : 0;
-                const d = v > 0 && lastV > 0 ? v - lastV : null;
-                return (
-                  <div key={id} className="py-3" style={{ borderBottom: `1px solid ${C.line}` }}>
-                    <div className="flex items-baseline justify-between mb-2">
-                      <p style={{ fontSize: 15, fontWeight: 500 }}>{label}</p>
-                      <p className="flex items-baseline gap-2">
-                        {d !== null && d !== 0 && <Delta d={d} small />}
-                        <span style={{ fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 700, fontSize: 20, color: v ? bandColor(v) : C.steel, minWidth: 24, textAlign: "right", display: "inline-block" }}>
-                          {v || "–"}
-                        </span>
-                      </p>
-                    </div>
-                    <div className="flex gap-1" role="group" aria-label={`${label} rating`}>
-                      {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => {
-                        const filled = v >= n;
-                        return (
-                          <button
-                            key={n}
-                            onClick={() => setScore(id, n)}
-                            aria-label={`${n} out of 10`}
-                            className="flex-1 rounded"
-                            style={{
-                              height: 40,
-                              background: filled ? bandColor(v) : "#fff",
-                              border: `1px solid ${filled ? bandColor(v) : C.line}`,
-                              color: filled ? "#fff" : C.steel,
-                              fontFamily: "'Barlow Condensed', sans-serif",
-                              fontWeight: 600,
-                              fontSize: 14,
-                              transition: "background 0.1s, border 0.1s",
-                            }}
-                          >
-                            {n}
-                          </button>
-                        );
-                      })}
-                    </div>
+            {evaluatorsWithData.length > 0 && (
+              <div>
+                <div className="flex gap-4 mt-4 justify-center flex-wrap">
+                  {evaluatorsWithData.map((e) => (
+                    <span key={e.id} className="flex items-center gap-1">
+                      <span style={{ width: 12, height: 12, background: e.color, borderRadius: 3, display: "inline-block" }} />
+                      <span style={{ fontFamily: condensed, fontWeight: 600, fontSize: 14, letterSpacing: "0.06em" }}>
+                        {e.label.toUpperCase()} · {fmtShort(latestByEvaluator[e.id].date)}
+                      </span>
+                    </span>
+                  ))}
+                </div>
+
+                <section className="mt-4 rounded-lg px-3 py-4" style={{ background: "#fff", border: `1px solid ${C.line}` }}>
+                  <h2 style={{ fontFamily: condensed, fontWeight: 700, fontSize: 20, letterSpacing: "0.1em", textAlign: "center" }}>
+                    LATEST EVALUATIONS — BY CATEGORY
+                  </h2>
+                  <RadarOverlay latestByEvaluator={latestByEvaluator} />
+                  <p style={{ color: C.steel, fontSize: 12, textAlign: "center" }}>Dashed ring = average 12U AA forward (5)</p>
+                </section>
+
+                <section className="mt-4 rounded-lg px-3 py-4" style={{ background: "#fff", border: `1px solid ${C.line}` }}>
+                  <h2 style={{ fontFamily: condensed, fontWeight: 700, fontSize: 20, letterSpacing: "0.1em", textAlign: "center" }}>
+                    OVR OVER TIME
+                  </h2>
+                  <TrendChart store={store} />
+                  <p style={{ color: C.steel, fontSize: 12, textAlign: "center" }}>Dashed line = league-average 50 OVR</p>
+                </section>
+
+                <section className="mt-4 rounded-lg" style={{ background: "#fff", border: `1px solid ${C.line}` }}>
+                  <div className="px-4 py-3" style={{ borderBottom: `1px solid ${C.line}` }}>
+                    <h2 style={{ fontFamily: condensed, fontWeight: 700, fontSize: 20, letterSpacing: "0.1em" }}>PERCEPTION GAPS</h2>
+                    <p style={{ color: C.steel, fontSize: 12, marginTop: 2 }}>Biggest disagreements between evaluators' latest saves</p>
                   </div>
-                );
-              })}
-            </section>
-          );
-        })}
+                  {evaluatorsWithData.length < 2 ? (
+                    <p className="px-4 py-4" style={{ color: C.steel, fontSize: 14 }}>
+                      Needs saved evaluations from at least two evaluators.
+                    </p>
+                  ) : gaps.length === 0 ? (
+                    <p className="px-4 py-4" style={{ color: C.steel, fontSize: 14 }}>
+                      No gaps of 2+ points — everyone's seeing the same player right now.
+                    </p>
+                  ) : (
+                    gaps.map((g, i) => (
+                      <div key={g.id} className="px-4 py-3 flex items-center justify-between" style={{ borderBottom: i < gaps.length - 1 ? `1px solid ${C.line}` : "none" }}>
+                        <div>
+                          <p style={{ fontSize: 14, fontWeight: 600 }}>{g.label}</p>
+                          <p style={{ fontSize: 13, marginTop: 2 }}>
+                            <span style={{ color: g.hi.e.color, fontWeight: 600 }}>{g.hi.e.label} {g.hi.v}</span>
+                            <span style={{ color: C.steel }}> vs </span>
+                            <span style={{ color: g.lo.e.color, fontWeight: 600 }}>{g.lo.e.label} {g.lo.v}</span>
+                          </p>
+                        </div>
+                        <span style={{ fontFamily: condensed, fontWeight: 700, fontSize: 22, color: g.gap >= 4 ? C.red : C.navy }}>
+                          {g.gap}<span style={{ fontSize: 11, color: C.steel, letterSpacing: "0.08em", marginLeft: 2 }}>GAP</span>
+                        </span>
+                      </div>
+                    ))
+                  )}
+                </section>
+              </div>
+            )}
 
-        {/* ---------- note ---------- */}
-        <section className="mt-6">
-          <h2 style={{ fontFamily: "'Barlow Condensed', sans-serif", fontWeight: 700, fontSize: 22, letterSpacing: "0.1em" }}>
-            NOTES
-          </h2>
-          <textarea
-            value={note}
-            onChange={(e) => setNote(e.target.value)}
-            placeholder="Context for this evaluation — coach feedback, what to work on next…"
-            rows={3}
-            className="w-full mt-2 rounded-lg px-3 py-2"
-            style={{ border: `1px solid ${C.line}`, background: "#fff", fontSize: 14, color: C.navy, resize: "vertical" }}
-          />
-          <p style={{ color: C.steel, fontSize: 12, marginTop: 10 }}>
-            Playing time at AA follows Compete, Hockey IQ, and Coachability more than raw skill. Watch those categories first.
-          </p>
-        </section>
+            <section className="mt-4 rounded-lg px-4 py-4" style={{ background: "#fff", border: `1px solid ${C.line}` }}>
+              <h2 style={{ fontFamily: condensed, fontWeight: 700, fontSize: 20, letterSpacing: "0.1em" }}>BACKUP</h2>
+              <p style={{ color: C.steel, fontSize: 13, marginTop: 4 }}>
+                All data lives on this device only. Download a backup after eval sessions; restore it if you switch phones.
+              </p>
+              <div className="flex gap-2 mt-3">
+                <button onClick={exportData} className="px-4 py-2 rounded-lg" style={{ background: C.navy, color: "#fff", fontFamily: condensed, fontWeight: 600, fontSize: 15, letterSpacing: "0.08em" }}>
+                  DOWNLOAD BACKUP
+                </button>
+                <button onClick={() => fileRef.current && fileRef.current.click()} className="px-4 py-2 rounded-lg" style={{ background: "#fff", border: `1px solid ${C.line}`, color: C.navy, fontFamily: condensed, fontWeight: 600, fontSize: 15, letterSpacing: "0.08em" }}>
+                  RESTORE
+                </button>
+                <input ref={fileRef} type="file" accept=".json,application/json" onChange={importData} style={{ display: "none" }} />
+              </div>
+            </section>
+          </div>
+        )}
       </div>
     </div>
   );
