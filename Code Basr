@@ -1,5 +1,3 @@
-import { useState, useEffect, useRef } from "react";
-
 // ---------- palette ----------
 const C = {
   ice: "#EFF4F8",      // page background — cool ice white
